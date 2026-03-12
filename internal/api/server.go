@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/tokenpanelasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -259,6 +260,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if authManager != nil {
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 	}
+	if err := usage.ConfigureSQLitePersistence(cfg.AuthDir); err != nil {
+		log.WithError(err).Warn("failed to configure sqlite usage persistence")
+	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	// Initialize management handler
@@ -318,6 +322,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/token-usage", s.serveTokenUsagePanel)
+	s.engine.GET("/token-usage/", s.serveTokenUsagePanel)
+	s.engine.GET("/token-usage/assets/*filepath", s.serveTokenUsagePanelAsset)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -487,6 +494,9 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/token-usage/options", s.mgmt.GetUsageLedgerOptions)
+		mgmt.GET("/token-usage/summary", s.mgmt.GetUsageLedgerSummary)
+		mgmt.GET("/token-usage/records", s.mgmt.GetUsageLedgerRecords)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)
@@ -681,6 +691,44 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 	}
 
 	c.File(filePath)
+}
+
+func (s *Server) serveTokenUsagePanel(c *gin.Context) {
+	cfg := s.cfg
+	if cfg == nil || cfg.RemoteManagement.DisableControlPanel {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	data, err := tokenpanelasset.IndexHTML()
+	if err != nil {
+		log.WithError(err).Error("failed to read token usage panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+}
+
+func (s *Server) serveTokenUsagePanelAsset(c *gin.Context) {
+	cfg := s.cfg
+	if cfg == nil || cfg.RemoteManagement.DisableControlPanel {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
+	filepath := strings.TrimPrefix(c.Param("filepath"), "/")
+	if filepath == "" {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
+	data, contentType, err := tokenpanelasset.Asset(filepath)
+	if err != nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, contentType, data)
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
@@ -900,7 +948,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	}
 
-	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
+	if oldCfg == nil || oldCfg.AuthDir != cfg.AuthDir || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
+		if err := usage.ConfigureSQLitePersistence(cfg.AuthDir); err != nil {
+			log.WithError(err).Warn("failed to reconfigure sqlite usage persistence")
+		}
 		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	}
 

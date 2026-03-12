@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Token 消耗看板</title>
+    <script>
+      (function () {
+        try {
+          var raw = localStorage.getItem("cli-proxy-theme");
+          var parsed = raw ? JSON.parse(raw) : {};
+          var state = parsed && typeof parsed === "object" && parsed.state ? parsed.state : parsed;
+          var theme = state && typeof state.theme === "string" ? state.theme : "auto";
+          var resolved = theme === "auto"
+            ? (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+            : theme;
+          if (resolved === "dark") {
+            document.documentElement.setAttribute("data-theme", "dark");
+          } else if (resolved === "white") {
+            document.documentElement.setAttribute("data-theme", "white");
+          } else {
+            document.documentElement.removeAttribute("data-theme");
+          }
+        } catch (_error) {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/token-usage/assets/styles.css">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="page-header">
+        <div class="page-copy-block">
+          <p class="eyebrow">CLIProxyAPI</p>
+          <h1>Token 消耗看板</h1>
+          <p class="page-description">默认查看当天总 token 消耗，以及每个 key 的当天消耗。</p>
+        </div>
+        <div class="page-actions">
+          <span class="status-badge" id="status-badge">今天</span>
+          <a class="ghost-link" href="/management.html">返回管理页</a>
+        </div>
+      </header>
+
+      <section class="panel filter-panel filter-panel-collapsed" id="filter-panel">
+        <div class="filter-panel-head">
+          <div>
+            <h2>筛选条件</h2>
+            <p id="filter-summary">今天 / 全部 key / 全部模型</p>
+          </div>
+          <button id="filter-toggle-button" class="ghost-button panel-toggle-button" type="button" aria-expanded="false">展开筛选</button>
+        </div>
+        <div class="filter-panel-body" id="filter-panel-body">
+          <div class="filter-grid">
+            <label class="field">
+              <span>开始日期</span>
+              <input id="date-from" type="date">
+            </label>
+            <label class="field">
+              <span>结束日期</span>
+              <input id="date-to" type="date">
+            </label>
+            <label class="field">
+              <span>Key</span>
+              <select id="api-key-filter">
+                <option value="">全部 key</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>模型</span>
+              <select id="model-filter">
+                <option value="">全部模型</option>
+              </select>
+            </label>
+          </div>
+          <div class="quick-range-row">
+            <span class="quick-range-label">快捷日期</span>
+            <div class="quick-range-actions">
+              <button id="range-today-button" class="quick-range-button" type="button">今天</button>
+              <button id="range-7d-button" class="quick-range-button" type="button">最近 7 天</button>
+              <button id="range-30d-button" class="quick-range-button" type="button">最近 30 天</button>
+            </div>
+          </div>
+          <div class="toolbar">
+            <button id="query-button" type="button">查询</button>
+            <button id="reset-button" class="ghost-button" type="button">重置为今天</button>
+          </div>
+          <p class="status-text" id="query-message">数据只会在页面加载、浏览器刷新或手动查询时更新。</p>
+        </div>
+      </section>
+
+      <section class="board-grid">
+        <article class="panel total-card">
+          <p class="card-label">总 Token</p>
+          <div class="mega-number" id="total-tokens">0</div>
+          <p class="summary-caption" id="summary-caption">今天的总 token 消耗</p>
+          <p class="summary-subtext" id="total-raw">0 tokens</p>
+          <div class="total-filter-block">
+            <p class="card-label secondary">当前查看范围</p>
+            <div class="chip-row" id="active-filters"></div>
+          </div>
+        </article>
+
+        <section class="panel ranking-panel">
+          <div class="section-head ranking-head">
+            <div>
+              <h2>Key 排名</h2>
+              <p>右侧按脱敏后的 key 展示 token 排名，按消耗从高到低排列。</p>
+            </div>
+            <span class="section-meta" id="key-count-label">0 个 key</span>
+          </div>
+          <div class="ranking-list" id="key-summary-board"></div>
+        </section>
+      </section>
+
+      <section class="panel trend-panel">
+        <div class="section-head compact">
+          <div>
+            <h2>近 7 天总 Token</h2>
+            <p>底部图表固定展示最近 7 天每天的总 token 消耗。</p>
+          </div>
+        </div>
+        <div class="trend-chart" id="trend-chart"></div>
+      </section>
+    </div>
+
+    <script src="/token-usage/assets/vendor/echarts.min.js"></script>
+    <script src="/token-usage/assets/app.js"></script>
+  </body>
+</html>
