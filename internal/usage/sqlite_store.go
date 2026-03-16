@@ -64,12 +64,14 @@ type UsageLedgerDailyTotal struct {
 }
 
 type UsageLedgerSummary struct {
-	Query     UsageLedgerQuery        `json:"query"`
-	Totals    UsageLedgerTotals       `json:"totals"`
-	ByAPIKey  []UsageLedgerBucket     `json:"by_api_key"`
-	ByModel   []UsageLedgerBucket     `json:"by_model"`
-	Last7Days []UsageLedgerDailyTotal `json:"last_7_days"`
-	Status    PersistenceStatus       `json:"status"`
+	Query          UsageLedgerQuery        `json:"query"`
+	Totals         UsageLedgerTotals       `json:"totals"`
+	ByAPIKey       []UsageLedgerBucket     `json:"by_api_key"`
+	ByModel        []UsageLedgerBucket     `json:"by_model"`
+	Last7Days      []UsageLedgerDailyTotal `json:"last_7_days"`
+	TrendDays      []UsageLedgerDailyTotal `json:"trend_days"`
+	TrendRangeDays int                     `json:"trend_range_days"`
+	Status         PersistenceStatus       `json:"status"`
 }
 
 type UsageLedgerRecord struct {
@@ -381,6 +383,10 @@ func (s *sqliteUsageStore) QuerySummary(ctx context.Context, query UsageLedgerQu
 		return result, err
 	}
 	if result.Last7Days, err = s.queryLastNDays(ctx, result.Query, 7); err != nil {
+		return result, err
+	}
+	result.TrendRangeDays = usageLedgerTrendDays(result.Query)
+	if result.TrendDays, err = s.queryLastNDays(ctx, result.Query, result.TrendRangeDays); err != nil {
 		return result, err
 	}
 	result.Status = s.Status()
@@ -712,6 +718,25 @@ func normalizeUsageLedgerQuery(query UsageLedgerQuery) UsageLedgerQuery {
 		query.PageSize = 200
 	}
 	return query
+}
+
+func usageLedgerTrendDays(query UsageLedgerQuery) int {
+	if query.DateFrom == "" || query.DateTo == "" {
+		return 7
+	}
+	start, errStart := time.Parse("2006-01-02", query.DateFrom)
+	end, errEnd := time.Parse("2006-01-02", query.DateTo)
+	if errStart != nil || errEnd != nil {
+		return 7
+	}
+	if end.Before(start) {
+		return 7
+	}
+	days := int(end.Sub(start).Hours()/24) + 1
+	if days >= 30 {
+		return 30
+	}
+	return 7
 }
 
 func usageLedgerWhereClause(query UsageLedgerQuery) (string, []any, error) {

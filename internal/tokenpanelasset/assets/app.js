@@ -1,14 +1,21 @@
 (function () {
   const apiBase = "/v0/management/token-usage";
+  const managementApiBase = "/v0/management";
+  const codexQuotaURL = "https://chatgpt.com/backend-api/wham/usage";
+  const codexQuotaHeaders = {
+    Authorization: "Bearer $TOKEN$",
+    "Content-Type": "application/json",
+    "User-Agent": "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
+  };
   const secureStoragePrefix = "enc::v1::";
   const secureStorageNamespace = "cli-proxy-api-webui::secure-storage";
   const authStoreKey = "cli-proxy-auth";
   const themeStoreKey = "cli-proxy-theme";
-  let lastOptionsKey = "";
-  let filterExpanded = false;
+  let currentRangeDays = 1;
   let managementKey = "";
   let trendChartInstance = null;
   let lastTrendPoints = [];
+  let quotaLoading = false;
 
   const compactNumberFormatter = new Intl.NumberFormat("en-US", {
     notation: "compact",
@@ -18,21 +25,13 @@
   const fullNumberFormatter = new Intl.NumberFormat("en-US");
 
   const elements = {
-    filterPanel: document.getElementById("filter-panel"),
-    filterPanelBody: document.getElementById("filter-panel-body"),
-    filterToggleButton: document.getElementById("filter-toggle-button"),
     filterSummary: document.getElementById("filter-summary"),
-    queryButton: document.getElementById("query-button"),
-    resetButton: document.getElementById("reset-button"),
     rangeTodayButton: document.getElementById("range-today-button"),
+    range3dButton: document.getElementById("range-3d-button"),
     range7dButton: document.getElementById("range-7d-button"),
     range30dButton: document.getElementById("range-30d-button"),
     queryMessage: document.getElementById("query-message"),
     statusBadge: document.getElementById("status-badge"),
-    dateFrom: document.getElementById("date-from"),
-    dateTo: document.getElementById("date-to"),
-    apiKeyFilter: document.getElementById("api-key-filter"),
-    modelFilter: document.getElementById("model-filter"),
     totalTokens: document.getElementById("total-tokens"),
     totalRaw: document.getElementById("total-raw"),
     summaryCaption: document.getElementById("summary-caption"),
@@ -40,6 +39,12 @@
     keyCountLabel: document.getElementById("key-count-label"),
     keySummaryBoard: document.getElementById("key-summary-board"),
     trendChart: document.getElementById("trend-chart"),
+    trendTitle: document.getElementById("trend-title"),
+    trendDescription: document.getElementById("trend-description"),
+    quotaRefreshButton: document.getElementById("quota-refresh-button"),
+    quotaCountLabel: document.getElementById("quota-count-label"),
+    quotaMessage: document.getElementById("quota-message"),
+    quotaList: document.getElementById("quota-list"),
   };
 
   function redirectToManagement() {
@@ -59,15 +64,6 @@
     const local = new Date(now.getTime() - offset * 60000);
     local.setUTCDate(local.getUTCDate() + daysFromToday);
     return local.toISOString().slice(0, 10);
-  }
-
-  function setDefaultDates() {
-    const today = todayString();
-    elements.dateFrom.value = today;
-    elements.dateTo.value = today;
-    elements.statusBadge.textContent = "今天";
-    syncQuickRangeState();
-    renderFilterSummary(readFilters());
   }
 
   function formatCompactNumber(value) {
@@ -94,6 +90,19 @@
   function setQueryMessage(message, isError) {
     elements.queryMessage.textContent = message;
     elements.queryMessage.classList.toggle("error", Boolean(isError));
+  }
+
+  function setQuotaMessage(message, isError) {
+    elements.quotaMessage.textContent = message;
+    elements.quotaMessage.classList.toggle("error", Boolean(isError));
+  }
+
+  function setQuotaLoadingState(loading) {
+    quotaLoading = Boolean(loading);
+    if (elements.quotaRefreshButton) {
+      elements.quotaRefreshButton.disabled = quotaLoading;
+      elements.quotaRefreshButton.textContent = quotaLoading ? "正在加载..." : "刷新额度";
+    }
   }
 
   function encodeText(value) {
@@ -239,7 +248,7 @@
     };
   }
 
-  async function apiGet(path, query) {
+  function buildURL(base, path, query) {
     const params = new URLSearchParams();
     Object.entries(query || {}).forEach(function ([key, value]) {
       if (value !== undefined && value !== null && String(value).trim() !== "") {
@@ -247,10 +256,16 @@
       }
     });
 
-    const url = params.toString() ? apiBase + path + "?" + params.toString() : apiBase + path;
+    return params.toString() ? base + path + "?" + params.toString() : base + path;
+  }
+
+  async function requestJSON(url, options) {
+    const requestOptions = options || {};
     const response = await fetch(url, {
-      headers: authHeaders(),
-      cache: "no-store",
+      method: requestOptions.method || "GET",
+      headers: Object.assign({}, authHeaders(), requestOptions.headers || {}),
+      body: requestOptions.body,
+      cache: requestOptions.cache || "no-store",
     });
 
     if (response.status === 401 || response.status === 403) {
@@ -268,89 +283,79 @@
     return response.json();
   }
 
+  async function apiGet(path, query) {
+    const url = buildURL(apiBase, path, query);
+    return requestJSON(url, { cache: "no-store" });
+  }
+
+  async function managementGet(path, query) {
+    const url = buildURL(managementApiBase, path, query);
+    return requestJSON(url, { cache: "no-store" });
+  }
+
+  async function managementPost(path, payload) {
+    const url = managementApiBase + path;
+    return requestJSON(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload || {}),
+      cache: "no-store",
+    });
+  }
+
   function readFilters() {
+    return buildDateRangeQuery(currentRangeDays);
+  }
+
+  function buildDateRangeQuery(days) {
+    const normalizedDays = normalizeRangeDays(days);
     return {
-      date_from: elements.dateFrom.value,
-      date_to: elements.dateTo.value,
-      api_key: elements.apiKeyFilter.value,
-      model: elements.modelFilter.value,
+      date_from: normalizedDays === 1 ? todayString() : offsetDateString(-(normalizedDays - 1)),
+      date_to: todayString(),
     };
   }
 
-  function readOptionFilters() {
-    return {
-      date_from: elements.dateFrom.value,
-      date_to: elements.dateTo.value,
-    };
+  function normalizeRangeDays(days) {
+    return days === 3 || days === 7 || days === 30 ? days : 1;
+  }
+
+  function quickRangeLabel(days) {
+    switch (normalizeRangeDays(days)) {
+      case 3:
+        return "近 3 天";
+      case 7:
+        return "近 7 天";
+      case 30:
+        return "近一个月";
+      default:
+        return "当天";
+    }
   }
 
   function renderFilterSummary(filters) {
-    const items = [
-      formatDateRange(filters || {}),
-      filters && filters.api_key ? "Key: " + filters.api_key : "全部 key",
-      filters && filters.model ? "模型: " + filters.model : "全部模型",
-    ];
-    elements.filterSummary.textContent = items.join(" / ");
-  }
-
-  function setFilterExpanded(expanded) {
-    filterExpanded = Boolean(expanded);
-    elements.filterPanel.classList.toggle("filter-panel-collapsed", !filterExpanded);
-    elements.filterToggleButton.setAttribute("aria-expanded", String(filterExpanded));
-    elements.filterToggleButton.textContent = filterExpanded ? "收起筛选" : "展开筛选";
+    elements.filterSummary.textContent = quickRangeLabel(rangeDaysFromQuery(filters));
   }
 
   function syncQuickRangeState() {
-    const today = todayString();
     const rangeMap = {
-      today: elements.dateFrom.value === today && elements.dateTo.value === today,
-      "7d": elements.dateFrom.value === offsetDateString(-6) && elements.dateTo.value === today,
-      "30d": elements.dateFrom.value === offsetDateString(-29) && elements.dateTo.value === today,
+      today: currentRangeDays === 1,
+      "3d": currentRangeDays === 3,
+      "7d": currentRangeDays === 7,
+      "30d": currentRangeDays === 30,
     };
 
     elements.rangeTodayButton.classList.toggle("active", rangeMap.today);
+    elements.range3dButton.classList.toggle("active", rangeMap["3d"]);
     elements.range7dButton.classList.toggle("active", rangeMap["7d"]);
     elements.range30dButton.classList.toggle("active", rangeMap["30d"]);
   }
 
   function setDateRange(days) {
-    elements.dateTo.value = todayString();
-    elements.dateFrom.value = days === 1 ? todayString() : offsetDateString(-(days - 1));
+    currentRangeDays = normalizeRangeDays(days);
     syncQuickRangeState();
     renderFilterSummary(readFilters());
-    lastOptionsKey = "";
-  }
-
-  function optionKey(filters) {
-    return JSON.stringify(filters || {});
-  }
-
-  function renderOptions(options) {
-    renderSelectOptions(elements.apiKeyFilter, options.api_keys || [], "全部 key");
-    renderSelectOptions(elements.modelFilter, options.models || [], "全部模型");
-  }
-
-  function renderSelectOptions(select, values, emptyLabel) {
-    const previousValue = select.value;
-    select.innerHTML = "";
-
-    const emptyOption = document.createElement("option");
-    emptyOption.value = "";
-    emptyOption.textContent = emptyLabel;
-    select.appendChild(emptyOption);
-
-    values.forEach(function (value) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = value;
-      select.appendChild(option);
-    });
-
-    if (previousValue && values.indexOf(previousValue) !== -1) {
-      select.value = previousValue;
-      return;
-    }
-    select.value = "";
   }
 
   function renderSummary(summary) {
@@ -362,33 +367,19 @@
     renderFilterSummary(summary.query || {});
     renderActiveFilters(summary.query || {});
     renderKeyBoard(summary.by_api_key || [], totalTokens);
-    lastTrendPoints = Array.isArray(summary.last_7_days) ? summary.last_7_days : [];
+    updateTrendMeta(summary.query || {}, Number(summary.trend_range_days || 0));
+    lastTrendPoints = Array.isArray(summary.trend_days) ? summary.trend_days : (Array.isArray(summary.last_7_days) ? summary.last_7_days : []);
     renderTrendChart(lastTrendPoints);
   }
 
   function buildCaption(query) {
-    const isSingleDay = query.date_from && query.date_to && query.date_from === query.date_to;
-    if (isSingleDay) {
-      const singleDay = query.date_from;
-      elements.statusBadge.textContent = singleDay === todayString() ? "今天" : singleDay;
-      return (singleDay === todayString() ? "今天" : singleDay) + "的总 token 消耗";
-    }
-    if (query.date_from || query.date_to) {
-      const start = query.date_from || "最早";
-      const end = query.date_to || "最新";
-      elements.statusBadge.textContent = "区间";
-      return start + " 至 " + end + " 的总 token 消耗";
-    }
-    elements.statusBadge.textContent = "全部";
-    return "全部日期的总 token 消耗";
+    const label = quickRangeLabel(rangeDaysFromQuery(query));
+    elements.statusBadge.textContent = label;
+    return label + "的总 token 消耗";
   }
 
   function renderActiveFilters(query) {
-    const chips = [
-      buildFilterChip("日期", formatDateRange(query)),
-      buildFilterChip("Key", query.api_key || "全部 key"),
-      buildFilterChip("模型", query.model || "全部模型"),
-    ];
+    const chips = [buildFilterChip("范围", quickRangeLabel(rangeDaysFromQuery(query)))];
     elements.activeFilters.innerHTML = "";
     chips.forEach(function (chip) {
       elements.activeFilters.appendChild(chip);
@@ -422,6 +413,32 @@
       return (query.date_from || "最早") + " 至 " + (query.date_to || "最新");
     }
     return "全部日期";
+  }
+
+  function rangeDaysFromQuery(query) {
+    const dateFrom = query && query.date_from;
+    const dateTo = query && query.date_to;
+    if (!dateFrom || !dateTo) {
+      return currentRangeDays;
+    }
+    const start = new Date(dateFrom + "T00:00:00");
+    const end = new Date(dateTo + "T00:00:00");
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return currentRangeDays;
+    }
+    const diffDays = Math.floor((end.getTime() - start.getTime()) / 86400000) + 1;
+    return normalizeRangeDays(diffDays);
+  }
+
+  function updateTrendMeta(query, trendRangeDays) {
+    const normalizedTrendDays = trendRangeDays === 30 ? 30 : 7;
+    if (normalizedTrendDays === 30) {
+      elements.trendTitle.textContent = "近一个月总 Token";
+      elements.trendDescription.textContent = "当前选择近一个月时，这里同步展示近一个月每天的 token 趋势。";
+      return;
+    }
+    elements.trendTitle.textContent = "近 7 天总 Token";
+    elements.trendDescription.textContent = "当前选择为当天、近 3 天或近 7 天时，这里固定展示近 7 天趋势。";
   }
 
   function renderKeyBoard(rows, totalTokens) {
@@ -487,7 +504,7 @@
     });
   }
 
-  function maskKey(value) {
+  function maskSensitive(value) {
     const text = String(value || "").trim();
     if (!text) {
       return "-";
@@ -499,6 +516,282 @@
       return text.slice(0, 1) + "*".repeat(Math.max(text.length - 2, 0)) + text.slice(-1);
     }
     return text.slice(0, 3) + "*".repeat(text.length - 6) + text.slice(-3);
+  }
+
+  function maskKey(value) {
+    return maskSensitive(value);
+  }
+
+  function normalizeString(value) {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed || null;
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+    return null;
+  }
+
+  function toNumber(value) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return null;
+      }
+      const numeric = Number(trimmed);
+      return Number.isFinite(numeric) ? numeric : null;
+    }
+    return null;
+  }
+
+  function toLowerValue(value) {
+    const text = normalizeString(value);
+    return text ? text.toLowerCase() : null;
+  }
+
+  function safeParseJSON(value) {
+    if (value == null) {
+      return null;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return null;
+      }
+      try {
+        return JSON.parse(trimmed);
+      } catch (_error) {
+        return null;
+      }
+    }
+    return typeof value === "object" ? value : null;
+  }
+
+  function decodeBase64Segment(value) {
+    const text = normalizeString(value);
+    if (!text) {
+      return null;
+    }
+    try {
+      const normalized = text.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+      return atob(padded);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function parseTokenPayload(value) {
+    if (!value) {
+      return null;
+    }
+    if (typeof value === "object" && !Array.isArray(value)) {
+      return value;
+    }
+    if (typeof value !== "string") {
+      return null;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const directObject = safeParseJSON(trimmed);
+    if (directObject && typeof directObject === "object" && !Array.isArray(directObject)) {
+      return directObject;
+    }
+    const segments = trimmed.split(".");
+    if (segments.length < 2) {
+      return null;
+    }
+    const decoded = decodeBase64Segment(segments[1]);
+    if (!decoded) {
+      return null;
+    }
+    const payload = safeParseJSON(decoded);
+    return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+  }
+
+  function extractCodexAccountId(entry) {
+    const idToken = parseTokenPayload(entry && entry.id_token);
+    return normalizeString(
+      (idToken && (idToken.chatgpt_account_id ?? idToken.chatgptAccountId)) ??
+      (entry && (entry.chatgpt_account_id ?? entry.chatgptAccountId))
+    );
+  }
+
+  function resolveCodexPlanType(entry) {
+    const idToken = parseTokenPayload(entry && entry.id_token);
+    const candidates = [
+      entry && (entry.plan_type ?? entry.planType),
+      idToken && (idToken.plan_type ?? idToken.planType),
+    ];
+    for (let index = 0; index < candidates.length; index += 1) {
+      const value = toLowerValue(candidates[index]);
+      if (value) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  function resolveCodexPlanLabel(planType) {
+    const normalized = toLowerValue(planType);
+    if (normalized === "plus") {
+      return "Plus";
+    }
+    if (normalized === "team") {
+      return "Team";
+    }
+    if (normalized === "free") {
+      return "Free";
+    }
+    return normalizeString(planType) || "-";
+  }
+
+  function resolveQuotaAccountLabel(entry) {
+    return normalizeString(entry && entry.account) ||
+      normalizeString(entry && entry.email) ||
+      normalizeString(entry && entry.label) ||
+      normalizeString(entry && entry.name) ||
+      "-";
+  }
+
+  function formatQuotaUnixDate(seconds) {
+    if (!seconds) {
+      return "-";
+    }
+    const date = new Date(Number(seconds) * 1000);
+    if (Number.isNaN(date.getTime())) {
+      return "-";
+    }
+    return date.toLocaleString(undefined, {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  }
+
+  function formatQuotaReset(windowData) {
+    if (!windowData) {
+      return "-";
+    }
+    const resetAt = toNumber(windowData.reset_at ?? windowData.resetAt);
+    if (resetAt !== null && resetAt > 0) {
+      return formatQuotaUnixDate(resetAt);
+    }
+    const resetAfterSeconds = toNumber(windowData.reset_after_seconds ?? windowData.resetAfterSeconds);
+    if (resetAfterSeconds !== null && resetAfterSeconds > 0) {
+      return formatQuotaUnixDate(Math.floor(Date.now() / 1000) + resetAfterSeconds);
+    }
+    return "-";
+  }
+
+  function extractResponseMessage(body) {
+    const payload = safeParseJSON(body);
+    if (payload && typeof payload === "object") {
+      const direct = normalizeString(payload.message) ||
+        normalizeString(payload.error) ||
+        normalizeString(payload.detail);
+      if (direct) {
+        return direct;
+      }
+      if (Array.isArray(payload.errors) && payload.errors.length > 0) {
+        const firstError = payload.errors[0];
+        return normalizeString(firstError && (firstError.message || firstError.detail)) || "请求失败";
+      }
+    }
+    return normalizeString(body) || "请求失败";
+  }
+
+  function resolveCodexWindowPair(rateLimit) {
+    const pair = {
+      primaryWindow: null,
+      secondaryWindow: null,
+    };
+    const primaryCandidate = rateLimit && (rateLimit.primary_window ?? rateLimit.primaryWindow);
+    const secondaryCandidate = rateLimit && (rateLimit.secondary_window ?? rateLimit.secondaryWindow);
+    [primaryCandidate, secondaryCandidate].forEach(function (windowData) {
+      if (!windowData) {
+        return;
+      }
+      const duration = toNumber(windowData.limit_window_seconds || windowData.limitWindowSeconds);
+      if (duration === 18000 && !pair.primaryWindow) {
+        pair.primaryWindow = windowData;
+        return;
+      }
+      if (duration === 604800 && !pair.secondaryWindow) {
+        pair.secondaryWindow = windowData;
+      }
+    });
+    if (!pair.primaryWindow) {
+      pair.primaryWindow = primaryCandidate && primaryCandidate !== pair.secondaryWindow ? primaryCandidate : null;
+    }
+    if (!pair.secondaryWindow) {
+      pair.secondaryWindow = secondaryCandidate && secondaryCandidate !== pair.primaryWindow ? secondaryCandidate : null;
+    }
+    return pair;
+  }
+
+  function buildCodexQuotaWindows(payload) {
+    const windows = [];
+    const standardRateLimit = payload.rate_limit ?? payload.rateLimit ?? null;
+    const codeReviewRateLimit = payload.code_review_rate_limit ?? payload.codeReviewRateLimit ?? null;
+
+    function pushWindow(id, label, windowData, limitReached, allowed) {
+      if (!windowData) {
+        return;
+      }
+      const resetLabel = formatQuotaReset(windowData);
+      const rawUsedPercent = toNumber(windowData.used_percent ?? windowData.usedPercent);
+      const usedPercent = rawUsedPercent !== null ? rawUsedPercent : (((Boolean(limitReached) || allowed === false) && resetLabel !== "-") ? 100 : null);
+      const remainingPercent = usedPercent === null ? null : Math.max(0, Math.min(100, 100 - usedPercent));
+      windows.push({
+        id: id,
+        label: label,
+        remainingPercent: remainingPercent,
+        resetLabel: resetLabel,
+      });
+    }
+
+    const standardPair = resolveCodexWindowPair(standardRateLimit);
+    pushWindow(
+      "primary-window",
+      "5 小时限额",
+      standardPair.primaryWindow,
+      standardRateLimit && (standardRateLimit.limit_reached ?? standardRateLimit.limitReached),
+      standardRateLimit && standardRateLimit.allowed
+    );
+    pushWindow(
+      "secondary-window",
+      "周限额",
+      standardPair.secondaryWindow,
+      standardRateLimit && (standardRateLimit.limit_reached ?? standardRateLimit.limitReached),
+      standardRateLimit && standardRateLimit.allowed
+    );
+
+    const codeReviewPair = resolveCodexWindowPair(codeReviewRateLimit);
+    pushWindow(
+      "code-review-primary-window",
+      "代码审查 5 小时限额",
+      codeReviewPair.primaryWindow,
+      codeReviewRateLimit && (codeReviewRateLimit.limit_reached ?? codeReviewRateLimit.limitReached),
+      codeReviewRateLimit && codeReviewRateLimit.allowed
+    );
+    pushWindow(
+      "code-review-secondary-window",
+      "代码审查周限额",
+      codeReviewPair.secondaryWindow,
+      codeReviewRateLimit && (codeReviewRateLimit.limit_reached ?? codeReviewRateLimit.limitReached),
+      codeReviewRateLimit && codeReviewRateLimit.allowed
+    );
+
+    return windows;
   }
 
   function renderTrendChart(points) {
@@ -555,9 +848,9 @@
       },
       grid: {
         top: 46,
-        right: 10,
-        bottom: 12,
-        left: 8,
+        right: 20,
+        bottom: 18,
+        left: 16,
         containLabel: true,
       },
       tooltip: {
@@ -584,9 +877,11 @@
           const firstItem = Array.isArray(params) ? params[0] : params;
           const value = firstItem && typeof firstItem.value !== "undefined" ? Number(firstItem.value || 0) : 0;
           const label = firstItem && firstItem.axisValue ? firstItem.axisValue : "-";
+          const compactValue = formatCompactNumber(value);
           return [
             '<div style="font-size:11px;font-weight:600;letter-spacing:0.02em;color:rgba(255,255,255,0.72);">' + label + "</div>",
-            '<div style="margin-top:4px;font-size:15px;font-weight:700;color:#ffffff;">' + formatFullNumber(value) + " Tokens</div>",
+            '<div style="margin-top:4px;font-size:15px;font-weight:700;color:#ffffff;">' + compactValue + " Tokens</div>",
+            '<div style="margin-top:2px;font-size:11px;color:rgba(255,255,255,0.72);">' + formatFullNumber(value) + " tokens</div>",
           ].join("");
         },
       },
@@ -609,6 +904,10 @@
           fontSize: 12,
           fontWeight: 700,
           margin: 14,
+          interval: 0,
+          showMinLabel: true,
+          showMaxLabel: true,
+          hideOverlap: false,
           formatter: function (value) {
             return formatChartDate(value);
           },
@@ -680,6 +979,262 @@
         },
       ],
     });
+  }
+
+  function renderQuotaList(items) {
+    elements.quotaList.innerHTML = "";
+    elements.quotaCountLabel.textContent = items.length + " 个账号";
+
+    if (!items.length) {
+      const emptyState = document.createElement("div");
+      emptyState.className = "empty-state";
+      emptyState.textContent = "暂无 Codex 认证文件";
+      elements.quotaList.appendChild(emptyState);
+      return;
+    }
+
+    elements.quotaList.appendChild(buildQuotaHeader());
+    items.forEach(function (item) {
+      elements.quotaList.appendChild(buildQuotaRow(item));
+    });
+  }
+
+  function renderQuotaIdleState() {
+    elements.quotaList.innerHTML = "";
+    elements.quotaCountLabel.textContent = "0 个账号";
+    const emptyState = document.createElement("div");
+    emptyState.className = "empty-state";
+    emptyState.textContent = "点击“刷新额度”后加载列表";
+    elements.quotaList.appendChild(emptyState);
+  }
+
+  function buildQuotaHeader() {
+    const header = document.createElement("div");
+    header.className = "quota-table-head";
+    ["账号", "套餐", "5 小时限额", "周限额", "代码审查周限额"].forEach(function (label) {
+      const cell = document.createElement("div");
+      cell.className = "quota-table-head-cell";
+      cell.textContent = label;
+      header.appendChild(cell);
+    });
+    return header;
+  }
+
+  function buildQuotaRow(item) {
+    const entry = item.entry || {};
+    const row = document.createElement("article");
+    row.className = "quota-table-row";
+
+    row.appendChild(buildQuotaAccountCell(entry));
+    row.appendChild(buildQuotaPlanCell(item));
+
+    const windowsById = indexQuotaWindows(item.windows || []);
+    row.appendChild(buildQuotaMetricCell(resolveQuotaMetricState(item, windowsById["primary-window"])));
+    row.appendChild(buildQuotaMetricCell(resolveQuotaMetricState(item, windowsById["secondary-window"])));
+    row.appendChild(buildQuotaMetricCell(resolveQuotaMetricState(item, windowsById["code-review-secondary-window"])));
+
+    return row;
+  }
+
+  function buildQuotaAccountCell(entry) {
+    const cell = document.createElement("div");
+    cell.className = "quota-table-cell quota-table-account-cell";
+
+    const value = document.createElement("div");
+    value.className = "quota-account-value";
+    value.textContent = maskSensitive(resolveQuotaAccountLabel(entry));
+
+    cell.appendChild(value);
+    return cell;
+  }
+
+  function buildQuotaPlanCell(item) {
+    const cell = document.createElement("div");
+    cell.className = "quota-table-cell quota-table-plan-cell";
+
+    const value = document.createElement("div");
+    value.className = "quota-plan-value";
+    value.textContent = resolveCodexPlanLabel(item.planType);
+
+    cell.appendChild(value);
+    return cell;
+  }
+
+  function buildQuotaMetricCell(metric) {
+    const cell = document.createElement("div");
+    cell.className = "quota-table-cell quota-table-metric-cell";
+    if (metric.statusClass) {
+      cell.classList.add(metric.statusClass);
+    }
+
+    const value = document.createElement("div");
+    value.className = "quota-percent";
+    value.textContent = metric.valueText;
+
+    const reset = document.createElement("div");
+    reset.className = "quota-reset";
+    reset.textContent = metric.resetText;
+
+    cell.appendChild(value);
+    cell.appendChild(reset);
+    return cell;
+  }
+
+  function indexQuotaWindows(windows) {
+    const index = {};
+    (Array.isArray(windows) ? windows : []).forEach(function (windowData) {
+      if (windowData && windowData.id) {
+        index[windowData.id] = windowData;
+      }
+    });
+    return index;
+  }
+
+  function resolveQuotaMetricState(item, windowData) {
+    if (item.error) {
+      return {
+        valueText: "--",
+        resetText: item.error,
+        statusClass: "is-error",
+      };
+    }
+    if (item.noAccess) {
+      return {
+        valueText: "--",
+        resetText: "无 Codex 权限",
+        statusClass: "is-muted",
+      };
+    }
+    if (!windowData) {
+      return {
+        valueText: "--",
+        resetText: "暂无额度数据",
+        statusClass: "is-muted",
+      };
+    }
+    return {
+      valueText: windowData.remainingPercent === null ? "--" : Math.round(windowData.remainingPercent) + "%",
+      resetText: windowData.resetLabel || "-",
+      statusClass: quotaMetricClass(windowData.remainingPercent),
+    };
+  }
+
+  function quotaMetricClass(remainingPercent) {
+    const percent = remainingPercent === null ? 0 : remainingPercent;
+    if (percent >= 80) {
+      return "is-high";
+    }
+    if (percent >= 50) {
+      return "is-medium";
+    }
+    return "is-low";
+  }
+
+  async function fetchCodexQuotaItem(entry) {
+    const authIndex = normalizeString(entry && (entry.auth_index || entry.authIndex));
+    if (!authIndex) {
+      return {
+        entry: entry,
+      error: "认证文件缺少 auth_index",
+      };
+    }
+
+    const accountId = extractCodexAccountId(entry);
+    if (!accountId) {
+      return {
+        entry: entry,
+        error: "Codex 凭证缺少 ChatGPT 账号 ID",
+      };
+    }
+
+    const response = await managementPost("/api-call", {
+      auth_index: authIndex,
+      method: "GET",
+      url: codexQuotaURL,
+      header: Object.assign({}, codexQuotaHeaders, {
+        "Chatgpt-Account-Id": accountId,
+      }),
+    });
+
+    const statusCode = Number(response.status_code ?? response.statusCode ?? 0);
+    if (statusCode < 200 || statusCode >= 300) {
+      const requestError = new Error(extractResponseMessage(response.body ?? response.bodyText));
+      requestError.status = statusCode;
+      throw requestError;
+    }
+
+    const payload = safeParseJSON(response.body ?? response.bodyText);
+    if (!payload || typeof payload !== "object") {
+      throw new Error("暂无额度数据");
+    }
+
+    const planType = toLowerValue(payload.plan_type ?? payload.planType) || resolveCodexPlanType(entry);
+    const windows = buildCodexQuotaWindows(payload);
+    return {
+      entry: entry,
+      planType: planType,
+      windows: windows,
+      noAccess: planType === "free" && windows.length === 0,
+    };
+  }
+
+  async function loadCodexQuota() {
+    const response = await managementGet("/auth-files");
+    const files = Array.isArray(response.files) ? response.files : [];
+    const codexEntries = files.filter(function (entry) {
+      return String(entry && (entry.provider || entry.type) || "").trim().toLowerCase() === "codex";
+    });
+
+    if (!codexEntries.length) {
+      renderQuotaList([]);
+      setQuotaMessage("当前没有可展示的 Codex 认证文件。", false);
+      return;
+    }
+
+    const items = await Promise.all(codexEntries.map(async function (entry) {
+      try {
+        return await fetchCodexQuotaItem(entry);
+      } catch (error) {
+        const normalizedError = error instanceof Error ? error : new Error("额度获取失败");
+        const planType = resolveCodexPlanType(entry);
+        if (normalizedError.status === 403 && planType === "free") {
+          return {
+            entry: entry,
+            planType: planType,
+            windows: [],
+            noAccess: true,
+          };
+        }
+        return {
+          entry: entry,
+          error: normalizedError.message || "额度获取失败",
+        };
+      }
+    }));
+
+    renderQuotaList(items);
+    setQuotaMessage("Codex 额度已更新。", false);
+  }
+
+  async function refreshCodexQuota() {
+    if (quotaLoading) {
+      return;
+    }
+    try {
+      setQuotaLoadingState(true);
+      setQuotaMessage("正在加载额度...", false);
+      await loadCodexQuota();
+    } catch (error) {
+      setQuotaMessage(error.message || "额度获取失败", true);
+      elements.quotaList.innerHTML = "";
+      elements.quotaCountLabel.textContent = "0 个账号";
+      const errorState = document.createElement("div");
+      errorState.className = "empty-state";
+      errorState.textContent = "额度获取失败，请稍后重试";
+      elements.quotaList.appendChild(errorState);
+    } finally {
+      setQuotaLoadingState(false);
+    }
   }
 
   function buildTrendLinePath(coordinates) {
@@ -759,38 +1314,15 @@
     if (parts.length !== 3) {
       return value;
     }
-    return parts[1] + "/" + parts[2];
-  }
-
-  async function loadOptions() {
-    const filters = readOptionFilters();
-    const nextKey = optionKey(filters);
-    if (nextKey === lastOptionsKey) {
-      return;
-    }
-
-    const options = await apiGet("/options", filters);
-    renderOptions(options);
-    lastOptionsKey = nextKey;
-  }
-
-  async function refreshOptionsOnly() {
-    try {
-      await loadOptions();
-      syncQuickRangeState();
-      setQueryMessage("已根据当前日期更新 key 和模型下拉列表。", false);
-    } catch (error) {
-      setQueryMessage(error.message || "筛选项加载失败", true);
-    }
+    return String(Number(parts[1])) + "/" + String(Number(parts[2]));
   }
 
   async function loadSummary() {
     const filters = readFilters();
     renderFilterSummary(filters);
-    await loadOptions();
     const summary = await apiGet("/summary", filters);
     renderSummary(summary);
-    setQueryMessage("看板已更新。数据只会在刷新页面或手动查询时变化。", false);
+    setQueryMessage("看板已更新。点击快捷范围会刷新数据。", false);
   }
 
   async function refreshBoard() {
@@ -803,63 +1335,28 @@
   }
 
   function bindEvents() {
-    elements.filterToggleButton.addEventListener("click", function () {
-      setFilterExpanded(!filterExpanded);
-    });
-
-    elements.queryButton.addEventListener("click", function () {
-      void refreshBoard();
-    });
-
-    elements.resetButton.addEventListener("click", function () {
-      setDefaultDates();
-      elements.apiKeyFilter.value = "";
-      elements.modelFilter.value = "";
-      lastOptionsKey = "";
-      void refreshBoard();
+    elements.quotaRefreshButton.addEventListener("click", function () {
+      void refreshCodexQuota();
     });
 
     elements.rangeTodayButton.addEventListener("click", function () {
       setDateRange(1);
-      elements.apiKeyFilter.value = "";
-      elements.modelFilter.value = "";
+      void refreshBoard();
+    });
+
+    elements.range3dButton.addEventListener("click", function () {
+      setDateRange(3);
       void refreshBoard();
     });
 
     elements.range7dButton.addEventListener("click", function () {
       setDateRange(7);
-      elements.apiKeyFilter.value = "";
-      elements.modelFilter.value = "";
       void refreshBoard();
     });
 
     elements.range30dButton.addEventListener("click", function () {
       setDateRange(30);
-      elements.apiKeyFilter.value = "";
-      elements.modelFilter.value = "";
       void refreshBoard();
-    });
-
-    elements.dateFrom.addEventListener("change", function () {
-      lastOptionsKey = "";
-      syncQuickRangeState();
-      renderFilterSummary(readFilters());
-      void refreshOptionsOnly();
-    });
-
-    elements.dateTo.addEventListener("change", function () {
-      lastOptionsKey = "";
-      syncQuickRangeState();
-      renderFilterSummary(readFilters());
-      void refreshOptionsOnly();
-    });
-
-    elements.apiKeyFilter.addEventListener("change", function () {
-      renderFilterSummary(readFilters());
-    });
-
-    elements.modelFilter.addEventListener("change", function () {
-      renderFilterSummary(readFilters());
     });
 
     window.addEventListener("storage", function (event) {
@@ -893,8 +1390,9 @@
 
   (function init() {
     applyThemeState();
-    setFilterExpanded(false);
-    setDefaultDates();
+    setDateRange(1);
+    renderQuotaIdleState();
+    setQuotaMessage("点击“刷新额度”后才会请求 Codex 额度。", false);
     bindEvents();
     if (!requireManagementAuth()) {
       return;

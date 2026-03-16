@@ -40,51 +40,20 @@
         </div>
       </header>
 
-      <section class="panel filter-panel filter-panel-collapsed" id="filter-panel">
-        <div class="filter-panel-head">
+      <section class="panel quick-panel">
+        <div class="quick-panel-head">
           <div>
-            <h2>筛选条件</h2>
-            <p id="filter-summary">今天 / 全部 key / 全部模型</p>
+            <h2>查看范围</h2>
+            <p id="filter-summary">今天</p>
           </div>
-          <button id="filter-toggle-button" class="ghost-button panel-toggle-button" type="button" aria-expanded="false">展开筛选</button>
+          <div class="quick-range-actions">
+            <button id="range-today-button" class="quick-range-button" type="button">当天</button>
+            <button id="range-3d-button" class="quick-range-button" type="button">近 3 天</button>
+            <button id="range-7d-button" class="quick-range-button" type="button">近 7 天</button>
+            <button id="range-30d-button" class="quick-range-button" type="button">近一个月</button>
+          </div>
         </div>
-        <div class="filter-panel-body" id="filter-panel-body">
-          <div class="filter-grid">
-            <label class="field">
-              <span>开始日期</span>
-              <input id="date-from" type="date">
-            </label>
-            <label class="field">
-              <span>结束日期</span>
-              <input id="date-to" type="date">
-            </label>
-            <label class="field">
-              <span>Key</span>
-              <select id="api-key-filter">
-                <option value="">全部 key</option>
-              </select>
-            </label>
-            <label class="field">
-              <span>模型</span>
-              <select id="model-filter">
-                <option value="">全部模型</option>
-              </select>
-            </label>
-          </div>
-          <div class="quick-range-row">
-            <span class="quick-range-label">快捷日期</span>
-            <div class="quick-range-actions">
-              <button id="range-today-button" class="quick-range-button" type="button">今天</button>
-              <button id="range-7d-button" class="quick-range-button" type="button">最近 7 天</button>
-              <button id="range-30d-button" class="quick-range-button" type="button">最近 30 天</button>
-            </div>
-          </div>
-          <div class="toolbar">
-            <button id="query-button" type="button">查询</button>
-            <button id="reset-button" class="ghost-button" type="button">重置为今天</button>
-          </div>
-          <p class="status-text" id="query-message">数据只会在页面加载、浏览器刷新或手动查询时更新。</p>
-        </div>
+        <p class="status-text" id="query-message">点击上方快捷范围后刷新看板数据。</p>
       </section>
 
       <section class="board-grid">
@@ -114,11 +83,26 @@
       <section class="panel trend-panel">
         <div class="section-head compact">
           <div>
-            <h2>近 7 天总 Token</h2>
-            <p>底部图表固定展示最近 7 天每天的总 token 消耗。</p>
+            <h2 id="trend-title">近 7 天总 Token</h2>
+            <p id="trend-description">当前选择为当天、近 3 天或近 7 天时，这里固定展示近 7 天趋势。</p>
           </div>
         </div>
         <div class="trend-chart" id="trend-chart"></div>
+      </section>
+
+      <section class="panel quota-panel">
+        <div class="section-head quota-head">
+          <div>
+            <h2>Codex 额度</h2>
+            <p>展示 Codex 账号的当前套餐和窗口额度，账号已脱敏。</p>
+          </div>
+          <div class="section-tools">
+            <span class="section-meta" id="quota-count-label">0 个账号</span>
+            <button id="quota-refresh-button" class="ghost-button" type="button">刷新额度</button>
+          </div>
+        </div>
+        <p class="status-text quota-status" id="quota-message">点击“刷新额度”后才会请求 Codex 额度。</p>
+        <div class="quota-list" id="quota-list"></div>
       </section>
     </div>
 
